@@ -1,325 +1,419 @@
+local whitelistCache = {}
+local refreshInterval = 5 * 60 * 1000
 
-prefix = '^0[^6VehicleTrustSystem^0] '
-
--- Code --
-RegisterServerEvent("primerp_vehwl:reloadwl")
-AddEventHandler("primerp_vehwl:reloadwl", function()
-    local _source = source
-    local identifiers = GetPlayerIdentifiers(_source)
-    TriggerClientEvent("primerp_vehwl:loadIdentifiers", _source, identifiers)
-end)
-
-AddEventHandler("playerSpawned", function()
-    TriggerEvent("primerp_vehwl:getIdentifiers")
-end)
-
-RegisterServerEvent("primerp_vehwl:saveFile")
-AddEventHandler("primerp_vehwl:saveFile", function(data)
-    SaveResourceFile(GetCurrentResourceName(), "whitelist.json", json.encode(data, { indent = true }), -1)
-end)
-function has_value (tab, val)
-    for index, value in ipairs(tab) do
-        if value == val then
-            return true
+function GetPlayerIdentifiers(source)
+    local identifiers = {
+        discord = nil,
+        steam = nil,
+        license = nil
+    }
+    
+    for _, identifier in pairs(GetPlayerIdentifiers(source)) do
+        if string.find(identifier, "discord:") then
+            identifiers.discord = string.gsub(identifier, "discord:", "")
+        elseif string.find(identifier, "steam:") then
+            identifiers.steam = string.gsub(identifier, "steam:", "")
+        elseif string.find(identifier, "license:") then
+            identifiers.license = string.gsub(identifier, "license:", "")
         end
     end
-
-    return false
+    
+    return identifiers
 end
-function get_index (tab, val)
-	local counter = 1
-    for index, value in ipairs(tab) do
-        if value == val then
-            return counter
+
+function LoadVehicleTrustData()
+    exports.oxmysql:execute('SELECT * FROM vehicletrustsystem', {}, function(result)
+        if result then
+            whitelistCache = result
+            print("[Vehicle Trust] Loaded " .. #result .. " vehicle trust entries from database.")
+        else
+            print("[Vehicle Trust] Failed to load vehicle trust data or no entries found.")
+            whitelistCache = {}
         end
-		counter = counter + 1
-    end
-
-    return nil
+    end)
 end
+
+Citizen.CreateThread(function()
+    LoadVehicleTrustData()
+    
+    while true do
+        Citizen.Wait(refreshInterval)
+        LoadVehicleTrustData()
+    end
+end)
+
+RegisterNetEvent('primerp_vehwl:reloadwl')
+AddEventHandler('primerp_vehwl:reloadwl', function()
+    local src = source
+    local identifiers = GetPlayerIdentifiers(src)
+    
+    TriggerClientEvent('primerp_vehwl:loadIdentifiers', src, identifiers)
+    
+    TriggerClientEvent('primerp_vehwl:RunCode:Client', src, whitelistCache)
+end)
+
 RegisterNetEvent('primerp_vehwl:Server:Check')
 AddEventHandler('primerp_vehwl:Server:Check', function()
-	local config = LoadResourceFile(GetCurrentResourceName(), "whitelist.json")
-    local cfg = json.decode(config)
-    TriggerClientEvent('primerp_vehwl:RunCode:Client', source, cfg)
+    local src = source
+    TriggerClientEvent('primerp_vehwl:RunCode:Client', src, whitelistCache)
 end)
 
---- COMMANDS ---
-RegisterCommand("vehicles", function(source, args, rawCommand)
-    -- Get the vehicles they can drive
-    local al = LoadResourceFile(GetCurrentResourceName(), "whitelist.json")
-    local cfg = json.decode(al)
-    local allowed = {}
-    local myIds = GetPlayerIdentifiers(source)
-    for pair,_ in pairs(cfg) do
-        -- Pair
-        if (pair == myIds[1]) then
-            for _,v in ipairs(cfg[pair]) do
-                --print(v.allowed)
-                --print("The vehicle is " .. v.spawncode .. " and allowed = " .. tostring(v.allowed) .. " with ID as " .. tostring(pair))
-                if (v.allowed) then
-                    table.insert(allowed, v.spawncode)
+RegisterNetEvent('primerp_vehwl:checkAccess')
+AddEventHandler('primerp_vehwl:checkAccess', function(vehicleModel, modelName)
+    local src = source
+    local identifiers = GetPlayerIdentifiers(src)
+    local isWhitelisted = false
+    local hasAccess = false
+    local vehicleName = modelName
+    
+    for _, vehicle in pairs(whitelistCache) do
+        local spawncode = vehicle.spawncode
+        if GetHashKey(spawncode) == vehicleModel or string.lower(spawncode) == string.lower(modelName) then
+            isWhitelisted = true
+            vehicleName = spawncode
+            
+            if (identifiers.discord and identifiers.discord == vehicle.discord) or
+               (identifiers.steam and identifiers.steam == vehicle.steam) or
+               (identifiers.license and identifiers.license == vehicle.license) then
+                if vehicle.allowed == 1 then
+                    hasAccess = true
+                    break
                 end
             end
         end
     end
-    if #allowed > 0 then
-        TriggerClientEvent('chatMessage', source, prefix .. "^2You are allowed access to drive the following vehicles:")
-        TriggerClientEvent('chatMessage', source, "^0" .. table.concat(allowed, ', '))
-    else
-        TriggerClientEvent('chatMessage', source, prefix .. "^1Sadly no one has gave you access to drive a personal vehicle :(")
-    end
-end)
-RegisterCommand("clear", function(source, args, rawCommand)
-	-- /clear <spawncode> == Basically reset a vehicle's data (owners and allowed to drive)
-    if IsPlayerAceAllowed(source, "VehwlCommands.Access") then
-    	-- Check args
-        if #args < 1 then
-        	TriggerClientEvent('chatMessage', source, prefix .. "^1ERROR: Not enough arguments... ^1Valid: /clear <spawncode>")
-        	return;
-        end
-    	local vehicle = string.upper(args[1])
-    	local al = LoadResourceFile(GetCurrentResourceName(), "whitelist.json")
-    	local cfg = json.decode(al)
-    	for pair,_ in pairs(cfg) do
-        	-- Pair
-        	local ind = 0
-        	for _,veh in ipairs(cfg[pair]) do
-        		ind = ind + 1
-        		if string.upper(veh.spawncode) == string.upper(vehicle) then
-                    table.remove(cfg[pair], ind)
-        		end
-        	end
-        end
-        TriggerClientEvent('chatMessage', source, prefix .. "^2Success: Removed all data of vehicle ^5" .. vehicle .. "^2")
-        TriggerClientEvent('vehwl:Cache:Update:ClearVeh', -1, vehicle)
-        TriggerEvent("primerp_vehwl:saveFile", cfg)
-    end
-end)
-RegisterCommand("setOwner", function(source, args, rawCommand)
-    -- Needs a staff Ace perm to do this
-    if IsPlayerAceAllowed(source, "VehwlCommands.Access") then
-	    if #args < 2 then
-	        -- Too low args
-	        TriggerClientEvent('chatMessage', source, prefix .. "^1ERROR: Not enough arguments... ^1Valid: /setOwner <id> <vehicleSpawncode>")
-	        return;
-	    end
-	    local id = tonumber(args[1])
-	    --print(GetPlayerIdentifiers(id)[1])
-	    if GetPlayerIdentifiers(id)[1] == nil then
-	    	TriggerClientEvent('chatMessage', source, prefix .. "^1ERROR: That is not a valid server ID of a player...")
-	    	return;
-	    end
-	    -- /setOwner <id> <vehicle>
-	    local vehicle = string.upper(args[2])
-	    local identifiers = GetPlayerIdentifiers(id)
-	    local steam = identifiers[1]
-	    local al = LoadResourceFile(GetCurrentResourceName(), "whitelist.json")
-	    local cfg = json.decode(al)
-	    -- Check that no one owns this vehicle before setting it:
-	    local vehicledOwned = false
-	    -- Check below:
-	    for pair,_ in pairs(cfg) do
-	    	-- Pair
-	    	for _,veh in ipairs(cfg[pair]) do
-	    		if string.upper(veh.spawncode) == string.upper(vehicle) then
-	    			if veh.owner == true then
-	    				vehicledOwned = true
-	    			end
-	    		end
-	    	end
-	    end
-	    -- Is it owned already?
-	    if not vehicledOwned then
-		    local vehiclesList = cfg[steam]
-		    if vehiclesList == nil then
-		    	cfg[steam] = {}
-		    	vehiclesList = {}
-		    end
-		    local hasValue = false
-		    local index = nil
-		    for i = 1, #vehiclesList do
-		    	if string.upper(vehicle) == string.upper(vehiclesList[i].spawncode) then
-		    		hasValue = true
-		    		index = i
-		    	end
-		    end
-		    if not hasValue then
-		    	-- Doesn't have it, add it
-		    	table.insert(vehiclesList, {
-		    		owner=true,
-		   			allowed=true,
-		   			spawncode=vehicle,
-		    	})
-		    else
-		    	-- It does have it, set it
-		    	vehiclesList[index].owner = true
-		    	vehiclesList[index].allowed = true
-		    end
-		    cfg[steam] = vehiclesList
-		    TriggerEvent("primerp_vehwl:saveFile", cfg)		 
-		    TriggerClientEvent('chatMessage', source, prefix .. "^2Success: You have set ^5" 
-		    	.. GetPlayerName(id) .. "^2 as the owner to the vehicle ^5" .. vehicle)
-		    TriggerClientEvent('chatMessage', id, prefix .. "^2You have been set " 
-		    	.. " to the owner of vehicle ^5" .. vehicle .. "^2 by ^5" .. GetPlayerName(source))
-		else
-			-- Vehicle is owned, need to /clear it first
-			TriggerClientEvent('chatMessage', source, prefix .. 
-				"^1ERROR: That vehicle is owned by someone already... Use /clear <spawncode> to clear it's data")
-		end
-	end -- Can't use it if not allowed
-end)
-function isOwner(src)
-	-- Check if they own the vehicle
-end
-RegisterCommand("trust", function(source, args, rawCommand)
-    local al = LoadResourceFile(GetCurrentResourceName(), "whitelist.json")
-    local cfg = json.decode(al)
-    -- /trust <id> <vehicle>
-    local vehicle = string.upper(args[2])
-    local id = tonumber(args[1])
-    -- Check args
-    if #args < 2 then
-    	TriggerClientEvent('chatMessage', source, prefix .. "^1ERROR: Not enough arguments... ^1Valid: /trust <id> <vehicleSpawncode>")
-    	return;
-    end
-    -- Check if valid id
-    if id == source then
-    	TriggerClientEvent('chatMessage', source, prefix .. "^1ERROR: You cannot trust yourself...")
-    	return;
-    end
-    if GetPlayerIdentifiers(id)[1] == nil then
-    	-- It's invalid
-    	TriggerClientEvent('chatMessage', source, prefix .. "^1ERROR: That is not a valid server ID of a player...")
-    	return;
-    end
-    local steam = GetPlayerIdentifiers(id)[1]
-    -- Check if has vehicle ownership and can do this command
-    local vehicledOwned = false
-    -- Check below:
-    for pair,_ in pairs(cfg) do
-    	-- Pair
-    	if tostring(GetPlayerIdentifiers(source)[1]) == tostring(pair) then 
-	    	for _,veh in ipairs(cfg[pair]) do
-	    		if string.upper(veh.spawncode) == string.upper(vehicle) then
-	    			if veh.owner == true then
-	    				vehicledOwned = true
-	    			end
-	    		end
-	    	end
-	    end
-    end
-    if not vehicledOwned then
-    	-- They do not own it, end this
-    	TriggerClientEvent('chatMessage', source, prefix .. "^1ERROR: You do not own this vehicle...")
-    	return;
-    end
-    local vehiclesList = cfg[steam]
-    if vehiclesList == nil then
-    	cfg[steam] = {}
-    	vehiclesList = {}
-    end
-    local hasValue = false
-    local index = nil
-    for i = 1, #vehiclesList do
-    	if string.upper(vehicle) == string.upper(vehiclesList[i].spawncode) then
-    		hasValue = true
-    		index = i
-    	end
-    end
-    if not hasValue then
-    	-- Doesn't have it, add it
-    	table.insert(vehiclesList, {
-    		owner=false,
-   			allowed=true,
-   			spawncode=vehicle,
-    	})
-    else
-    	-- It does have it, set it
-    	vehiclesList[index].owner = false
-    	vehiclesList[index].allowed = true
-    end
-    cfg[steam] = vehiclesList
-    TriggerEvent("primerp_vehwl:saveFile", cfg)
-    TriggerClientEvent('chatMessage', source, prefix .. "^2Success: You have given player ^5" 
-    	.. GetPlayerName(id) .. "^2 permission to drive your vehicle ^5"
-	 .. vehicle)
-    TriggerClientEvent('chatMessage', id, prefix .. "^2You have been trusted " 
-		    	.. " to use the vehicle, ^5" .. vehicle .. "^2 by owner ^5" .. GetPlayerName(source))
+    
+    TriggerClientEvent('primerp_vehwl:accessStatus', src, hasAccess, isWhitelisted, vehicleName)
 end)
 
-RegisterCommand("untrust", function(source, args, rawCommand)
-    local al = LoadResourceFile(GetCurrentResourceName(), "whitelist.json")
-    local cfg = json.decode(al)
-    -- /untrust <id> <vehicle>
-    local vehicle = string.upper(args[2])
-    local id = tonumber(args[1])
-    -- Check args
-    if #args < 2 then
-    	TriggerClientEvent('chatMessage', source, prefix .. "^1ERROR: Not enough arguments... ^1Valid: /untrust <id> <vehicleSpawncode>")
-    	return;
+RegisterNetEvent('primerp_vehwl:listMyVehicles')
+AddEventHandler('primerp_vehwl:listMyVehicles', function()
+    local src = source
+    local identifiers = GetPlayerIdentifiers(src)
+    local playerVehicles = {}
+    
+    for _, vehicle in pairs(whitelistCache) do
+        if ((identifiers.discord and identifiers.discord == vehicle.discord) or
+            (identifiers.steam and identifiers.steam == vehicle.steam) or
+            (identifiers.license and identifiers.license == vehicle.license)) and
+           vehicle.allowed == 1 then
+            table.insert(playerVehicles, {
+                spawncode = vehicle.spawncode,
+                owner = vehicle.owner
+            })
+        end
     end
-    -- Check if valid id
-    if id == source then
-    	TriggerClientEvent('chatMessage', source, prefix .. "^1ERROR: You cannot untrust yourself...")
-    	return;
-    end
-    if GetPlayerIdentifiers(id)[1] == nil then
-    	-- It's invalid
-    	TriggerClientEvent('chatMessage', source, prefix .. "^1ERROR: That is not a valid server ID of a player...")
-    	return;
-    end
-    local steam = GetPlayerIdentifiers(id)[1]
-    -- Check if has vehicle ownership and can do this command
-    local vehicledOwned = false
-    -- Check below:
-    for pair,_ in pairs(cfg) do
-    	-- Pair
-    	if tostring(GetPlayerIdentifiers(source)[1]) == tostring(pair) then 
-	    	for _,veh in ipairs(cfg[pair]) do
-	    		if string.upper(veh.spawncode) == string.upper(vehicle) then
-	    			if veh.owner == true then
-	    				vehicledOwned = true
-	    			end
-	    		end
-	    	end
-	    end
-    end
-    if not vehicledOwned then
-    	-- They do not own it, end this
-    	TriggerClientEvent('chatMessage', source, prefix .. "^1ERROR: You do not own this vehicle...")
-    	return;
-    end
-    local vehiclesList = cfg[steam]
-    if vehiclesList == nil then
-    	cfg[steam] = {}
-    	vehiclesList = {}
-    end
-    local hasValue = false
-    local index = nil
-    for i = 1, #vehiclesList do
-    	if string.upper(vehicle) == string.upper(vehiclesList[i].spawncode) then
-    		hasValue = true
-    		index = i
-    	end
-    end
-    if not hasValue then
-    	-- Doesn't have it, add it
-    	table.insert(vehiclesList, {
-    		owner=false,
-   			allowed=false,
-   			spawncode=vehicle,
-    	})
-    else
-    	-- It does have it, set it
-    	vehiclesList[index].owner = false
-    	vehiclesList[index].allowed = false
-    end
-    cfg[steam] = vehiclesList
-    TriggerEvent("primerp_vehwl:saveFile", cfg)
-	TriggerClientEvent('chatMessage', source, prefix .. "^2Success: ^1Player " 
-		.. GetPlayerName(id) .. "^1 no longer has permission to drive your vehicle ^5"
-	 .. vehicle)
-	TriggerClientEvent('chatMessage', id, prefix .. "^1Your " 
-		    	.. " trust to use the vehicle ^5" .. vehicle .. " ^1has been revoked by owner ^5" .. GetPlayerName(source))
+    
+    table.sort(playerVehicles, function(a, b)
+        if a.owner == b.owner then
+            return a.spawncode < b.spawncode
+        end
+        return a.owner > b.owner
+    end)
+    
+    TriggerClientEvent('primerp_vehwl:displayVehicleList', src, playerVehicles)
 end)
+
+RegisterCommand("setowner", function(source, args, rawCommand)
+    local src = source
+    
+    if not IsPlayerAceAllowed(src, "command.setowner") then
+        TriggerClientEvent('chat:addMessage', src, {
+            color = {255, 0, 0},
+            multiline = false,
+            args = {"Vehicle Trust", "You do not have permission to use this command!"}
+        })
+        return
+    end
+    
+    if #args < 2 then
+        TriggerClientEvent('chat:addMessage', src, {
+            color = {255, 255, 0},
+            multiline = false,
+            args = {"Vehicle Trust", "Usage: /setowner [playerID] [spawncode]"}
+        })
+        return
+    end
+    
+    local targetId = tonumber(args[1])
+    local spawncode = args[2]
+    
+    if not GetPlayerName(targetId) then
+        TriggerClientEvent('chat:addMessage', src, {
+            color = {255, 0, 0},
+            multiline = false,
+            args = {"Vehicle Trust", "Player ID " .. targetId .. " not found!"}
+        })
+        return
+    end
+    
+    local targetIdentifiers = GetPlayerIdentifiers(targetId)
+    
+    exports.oxmysql:execute('INSERT INTO vehicletrustsystem (discord, steam, license, spawncode, owner, allowed) VALUES (?, ?, ?, ?, 1, 1) ON DUPLICATE KEY UPDATE owner = 1, allowed = 1', 
+    {
+        targetIdentifiers.discord,
+        targetIdentifiers.steam, 
+        targetIdentifiers.license,
+        spawncode
+    }, function(affectedRows)
+        if affectedRows then
+            TriggerClientEvent('chat:addMessage', src, {
+                color = {0, 255, 0},
+                multiline = false,
+                args = {"Vehicle Trust", "Successfully set " .. GetPlayerName(targetId) .. " as owner of " .. spawncode}
+            })
+            
+            TriggerClientEvent('chat:addMessage', targetId, {
+                color = {0, 255, 0},
+                multiline = false,
+                args = {"Vehicle Trust", "You are now the owner of " .. spawncode}
+            })
+            
+            LoadVehicleTrustData()
+        else
+            TriggerClientEvent('chat:addMessage', src, {
+                color = {255, 0, 0},
+                multiline = false,
+                args = {"Vehicle Trust", "Failed to set ownership!"}
+            })
+        end
+    end)
+end, true)
+
+RegisterCommand("trust", function(source, args, rawCommand)
+    local src = source
+    
+    if #args < 2 then
+        TriggerClientEvent('chat:addMessage', src, {
+            color = {255, 255, 0},
+            multiline = false,
+            args = {"Vehicle Trust", "Usage: /trust [playerID] [spawncode]"}
+        })
+        return
+    end
+    
+    local targetId = tonumber(args[1])
+    local spawncode = args[2]
+    
+    if not GetPlayerName(targetId) then
+        TriggerClientEvent('chat:addMessage', src, {
+            color = {255, 0, 0},
+            multiline = false,
+            args = {"Vehicle Trust", "Player ID " .. targetId .. " not found!"}
+        })
+        return
+    end
+    
+    local identifiers = GetPlayerIdentifiers(src)
+    local isOwner = false
+    
+    for _, vehicle in pairs(whitelistCache) do
+        if vehicle.spawncode == spawncode and vehicle.owner == 1 and
+           ((identifiers.discord and identifiers.discord == vehicle.discord) or
+            (identifiers.steam and identifiers.steam == vehicle.steam) or
+            (identifiers.license and identifiers.license == vehicle.license)) then
+            isOwner = true
+            break
+        end
+    end
+    
+    if not isOwner and not IsPlayerAceAllowed(src, "command.trust") then
+        TriggerClientEvent('chat:addMessage', src, {
+            color = {255, 0, 0},
+            multiline = false,
+            args = {"Vehicle Trust", "You don't own this vehicle or don't have permission!"}
+        })
+        return
+    end
+    
+    local targetIdentifiers = GetPlayerIdentifiers(targetId)
+    
+    exports.oxmysql:execute('INSERT INTO vehicletrustsystem (discord, steam, license, spawncode, owner, allowed) VALUES (?, ?, ?, ?, 0, 1) ON DUPLICATE KEY UPDATE allowed = 1', 
+    {
+        targetIdentifiers.discord,
+        targetIdentifiers.steam, 
+        targetIdentifiers.license,
+        spawncode
+    }, function(affectedRows)
+        if affectedRows then
+            TriggerClientEvent('chat:addMessage', src, {
+                color = {0, 255, 0},
+                multiline = false,
+                args = {"Vehicle Trust", "Successfully trusted " .. GetPlayerName(targetId) .. " with " .. spawncode}
+            })
+            
+            TriggerClientEvent('chat:addMessage', targetId, {
+                color = {0, 255, 0},
+                multiline = false,
+                args = {"Vehicle Trust", "You've been trusted with access to " .. spawncode}
+            })
+            
+            LoadVehicleTrustData()
+        else
+            TriggerClientEvent('chat:addMessage', src, {
+                color = {255, 0, 0},
+                multiline = false,
+                args = {"Vehicle Trust", "Failed to set trust!"}
+            })
+        end
+    end)
+end, false)
+
+RegisterCommand("untrust", function(source, args, rawCommand)
+    local src = source
+    
+    if #args < 2 then
+        TriggerClientEvent('chat:addMessage', src, {
+            color = {255, 255, 0},
+            multiline = false,
+            args = {"Vehicle Trust", "Usage: /untrust [playerID] [spawncode]"}
+        })
+        return
+    end
+    
+    local targetId = tonumber(args[1])
+    local spawncode = args[2]
+    
+    if not GetPlayerName(targetId) then
+        TriggerClientEvent('chat:addMessage', src, {
+            color = {255, 0, 0},
+            multiline = false,
+            args = {"Vehicle Trust", "Player ID " .. targetId .. " not found!"}
+        })
+        return
+    end
+    
+    local identifiers = GetPlayerIdentifiers(src)
+    local isOwner = false
+    
+    for _, vehicle in pairs(whitelistCache) do
+        if vehicle.spawncode == spawncode and vehicle.owner == 1 and
+           ((identifiers.discord and identifiers.discord == vehicle.discord) or
+            (identifiers.steam and identifiers.steam == vehicle.steam) or
+            (identifiers.license and identifiers.license == vehicle.license)) then
+            isOwner = true
+            break
+        end
+    end
+    
+    if not isOwner and not IsPlayerAceAllowed(src, "command.untrust") then
+        TriggerClientEvent('chat:addMessage', src, {
+            color = {255, 0, 0},
+            multiline = false,
+            args = {"Vehicle Trust", "You don't own this vehicle or don't have permission!"}
+        })
+        return
+    end
+    
+    local targetIdentifiers = GetPlayerIdentifiers(targetId)
+
+    exports.oxmysql:execute('UPDATE vehicletrustsystem SET allowed = 0 WHERE spawncode = ? AND ((discord = ? AND discord IS NOT NULL) OR (steam = ? AND steam IS NOT NULL) OR (license = ? AND license IS NOT NULL))', 
+    {
+        spawncode,
+        targetIdentifiers.discord,
+        targetIdentifiers.steam,
+        targetIdentifiers.license
+    }, function(affectedRows)
+        if affectedRows > 0 then
+            TriggerClientEvent('chat:addMessage', src, {
+                color = {0, 255, 0},
+                multiline = false,
+                args = {"Vehicle Trust", "Successfully revoked " .. GetPlayerName(targetId) .. "'s access to " .. spawncode}
+            })
+            
+            TriggerClientEvent('chat:addMessage', targetId, {
+                color = {255, 165, 0},
+                multiline = false,
+                args = {"Vehicle Trust", "Your access to " .. spawncode .. " has been revoked"}
+            })
+            
+            LoadVehicleTrustData()
+        else
+            TriggerClientEvent('chat:addMessage', src, {
+                color = {255, 0, 0},
+                multiline = false,
+                args = {"Vehicle Trust", "Failed to revoke trust or no matching record found!"}
+            })
+        end
+    end)
+end, false)
+
+RegisterCommand("vehlist", function(source, args, rawCommand)
+    local src = source
+    
+    local targetId = source
+    if #args > 0 and IsPlayerAceAllowed(src, "command.vehlist") then
+        targetId = tonumber(args[1])
+        if not GetPlayerName(targetId) then
+            TriggerClientEvent('chat:addMessage', src, {
+                color = {255, 0, 0},
+                multiline = false,
+                args = {"Vehicle Trust", "Player ID " .. targetId .. " not found!"}
+            })
+            return
+        end
+    end
+    
+    if targetId ~= src and not IsPlayerAceAllowed(src, "command.vehlist") then
+        TriggerClientEvent('chat:addMessage', src, {
+            color = {255, 0, 0},
+            multiline = false,
+            args = {"Vehicle Trust", "You don't have permission to view others' vehicles!"}
+        })
+        return
+    end
+    
+    local targetIdent = GetPlayerIdentifiers(targetId)
+    local playerVehicles = {}
+    
+    for _, vehicle in pairs(whitelistCache) do
+        if ((targetIdent.discord and targetIdent.discord == vehicle.discord) or
+            (targetIdent.steam and targetIdent.steam == vehicle.steam) or
+            (targetIdent.license and targetIdent.license == vehicle.license)) and
+           vehicle.allowed == 1 then
+            table.insert(playerVehicles, {
+                spawncode = vehicle.spawncode,
+                owner = vehicle.owner
+            })
+        end
+    end
+    
+    table.sort(playerVehicles, function(a, b)
+        if a.owner == b.owner then
+            return a.spawncode < b.spawncode
+        end
+        return a.owner > b.owner
+    end)
+    
+    if src == targetId then
+        TriggerClientEvent('primerp_vehwl:displayVehicleList', src, playerVehicles)
+    else
+        TriggerClientEvent('chat:addMessage', src, {
+            color = {255, 255, 0},
+            multiline = false,
+            args = {"Vehicle Trust", "Vehicle list for " .. GetPlayerName(targetId) .. ":"}
+        })
+        
+        Citizen.Wait(50)
+        
+        for _, vehicle in ipairs(playerVehicles) do
+            local ownerText = vehicle.owner == 1 and " (Owner)" or ""
+            TriggerClientEvent('chat:addMessage', src, {
+                color = {255, 255, 255},
+                multiline = false,
+                args = {"", vehicle.spawncode .. ownerText}
+            })
+            Citizen.Wait(10)
+        end
+        
+        if #playerVehicles == 0 then
+            TriggerClientEvent('chat:addMessage', src, {
+                color = {255, 255, 255},
+                multiline = false,
+                args = {"", "No vehicles found."}
+            })
+        end
+    end
+end, false)
+
+print("^2Vehicle Trust System loaded successfully^7")
